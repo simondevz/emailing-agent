@@ -11,8 +11,16 @@ class PlaywrightExecutor:
         self.page: Optional[Page] = None
         self.session_file = Path("sessions") / f"{provider}_auth.json"
         self.provider_config = {
-            "gmail": {"url": "https://mail.google.com", "compose_selector": "[aria-label='Compose']"},
-            "outlook": {"url": "https://outlook.live.com/mail/0/", "compose_selector": "[aria-label='New message']"}
+            "gmail": {
+                "url": "https://mail.google.com",
+                "compose_selector": "[aria-label='Compose']",
+                "main_selector": ".bkK"  # Gmail main content
+            },
+            "outlook": {
+                "url": "https://outlook.live.com/mail/0/",
+                "compose_selector": "[aria-label='New message']",
+                "main_selector": "[role='main']"  # Outlook main content
+            }
         }
         self.headless = headless
         self.playwright = None
@@ -50,10 +58,8 @@ class PlaywrightExecutor:
             print(f"Navigating to {config['url']} for provider {self.provider}")
             await self.page.goto(config["url"], timeout=60000)
             
-            # Wait for Outlook UI to be fully loaded
             try:
                 await self.page.wait_for_load_state('networkidle', timeout=60000)
-                # Wait for key UI element (e.g., New message button or main content)
                 await self.page.wait_for_selector(
                     config["compose_selector"],
                     state="visible",
@@ -64,7 +70,6 @@ class PlaywrightExecutor:
                 print(f"Timeout waiting for {config['compose_selector']}. Taking screenshot for debugging.")
                 Path("screenshots").mkdir(exist_ok=True)
                 await self.page.screenshot(path=f"screenshots/{self.provider}_setup_failure.png")
-                # Check if on login page
                 current_url = self.page.url
                 if "login.live.com" in current_url:
                     print(f"Detected login page: {current_url}. Session may be invalid.")
@@ -104,22 +109,29 @@ class PlaywrightExecutor:
             self.browser = None
             self.playwright = None
 
-    async def get_dom(self) -> str:
-        """Get simplified DOM for planner analysis"""
+    async def get_dom(self, section: str = "main") -> str:
+        """Get simplified DOM for a specific section to reduce token usage"""
         if not self.page:
             print(f"Error: Page not initialized for {self.provider}")
             return "Error: Page not initialized"
         
-        dom_js = """
-        () => {
-            const snapshot = {
+        config = self.provider_config.get(self.provider, self.provider_config["gmail"])
+        section_selector = config.get("main_selector", "[role='main']")
+        if section == "toolbar":
+            section_selector = config.get("compose_selector", "[aria-label='New message']") + ", [role='toolbar']"
+        elif section == "compose":
+            section_selector = "div[role='dialog'], [aria-label*='compose' i]"
+        
+        dom_js = f"""
+        ({{ root }}) => {{
+            const snapshot = {{
                 url: window.location.href,
                 title: document.title,
                 compose_open: false,
                 clickable_elements: [],
                 input_fields: [],
                 buttons: []
-            };
+            }};
             
             // Check if compose is open
             const composeSelectors = [
@@ -129,59 +141,71 @@ class PlaywrightExecutor:
             ];
             snapshot.compose_open = composeSelectors.some(sel => document.querySelector(sel));
             
-            // Get clickable elements
-            document.querySelectorAll('button, [role="button"], a, [data-tooltip], [aria-label]').forEach(el => {
-                const text = el.textContent?.trim() || el.getAttribute('aria-label') || el.getAttribute('data-tooltip') || '';
-                if (text.length > 0 && text.length < 100) {
-                    snapshot.clickable_elements.push({
-                        text: text,
-                        tag: el.tagName.toLowerCase(),
-                        selector: el.id ? `#${el.id}` : (el.className ? `.${el.className.split(' ')[0]}` : el.tagName.toLowerCase()),
-                        visible: el.offsetParent !== null
-                    });
-                }
-            });
+            // Limit to specific section
+            const container = root ? root : document.querySelector('{section_selector}');
+            if (!container) {{
+                return {{ ...snapshot, error: 'Section {section_selector} not found' }};
+            }}
             
-            // Get input fields
-            document.querySelectorAll('input, textarea, [contenteditable="true"], [role="textbox"]').forEach(el => {
-                snapshot.input_fields.push({
+            // Get clickable elements (max 5)
+            container.querySelectorAll('button, [role="button"], a, [data-tooltip], [aria-label]').forEach((el, index) => {{
+                if (index >= 5) return;
+                const text = el.textContent?.trim() || el.getAttribute('aria-label') || el.getAttribute('data-tooltip') || '';
+                if (text.length > 0 && text.length < 100) {{
+                    snapshot.clickable_elements.push({{
+                        text: text,
+                        selector: el.id ? `#${{el.id}}` : `[aria-label="${{text}}" i]`
+                    }});
+                }}
+            }});
+            
+            // Get input fields (max 5)
+            container.querySelectorAll('input, textarea, [contenteditable="true"], [role="textbox"]').forEach((el, index) => {{
+                if (index >= 5) return;
+                snapshot.input_fields.push({{
                     type: el.type || 'text',
                     placeholder: el.placeholder || '',
-                    aria_label: el.getAttribute('aria-label') || '',
-                    name: el.name || '',
-                    value: el.value || el.textContent || '',
-                    selector: el.id ? `#${el.id}` : (el.name ? `[name="${el.name}"]` : (el.className ? `.${el.className.split(' ')[0]}` : el.tagName.toLowerCase())),
-                    visible: el.offsetParent !== null
-                });
-            });
+                    selector: el.id ? `#${{el.id}}` : `[name="${{el.name || 'unknown'}}"]`
+                }});
+            }});
             
-            // Get buttons with specific text
-            ['Send', 'New message', 'Attach', 'To', 'Subject'].forEach(text => {
-                const selector = `[aria-label*="${text}" i], [data-tooltip*="${text}" i], [title*="${text}" i]`;
-                const elements = document.querySelectorAll(selector);
-                elements.forEach(el => {
-                    if (!snapshot.buttons.some(b => b.text === text)) {
-                        snapshot.buttons.push({
-                            text: text,
-                            selector: el.id ? `#${el.id}` : `[aria-label*="${text}" i]`,
-                            available: el.offsetParent !== null
-                        });
-                    }
-                });
-            });
+            // Get buttons with specific text (max 5)
+            ['Send', 'New message', 'Attach', 'To', 'Subject'].forEach(text => {{
+                const elements = container.querySelectorAll(`[aria-label*="${{text}}" i], [data-tooltip*="${{text}}" i], [title*="${{text}}" i]`);
+                elements.forEach((el, index) => {{
+                    if (index >= 5 || snapshot.buttons.some(b => b.text === text)) return;
+                    snapshot.buttons.push({{
+                        text: text,
+                        selector: el.id ? `#${{el.id}}` : `[aria-label*="${{text}}" i]`,
+                        available: el.offsetParent !== null
+                    }});
+                }});
+            }});
+            
+            // Estimate token count (rough: 1 word ≈ 1.3 tokens)
+            const jsonString = JSON.stringify(snapshot);
+            const wordCount = jsonString.split(/\\s+/).length;
+            snapshot.token_estimate = Math.round(wordCount * 1.3);
             
             return snapshot;
-        }
+        }}
         """
         
         try:
-            result = await self.page.evaluate(dom_js)
-            print(f"DOM captured successfully for {self.provider}")
+            # Pass the section container to evaluate
+            container = await self.page.query_selector(section_selector)
+            result = await self.page.evaluate(dom_js, container)
+            print(f"DOM captured successfully for {self.provider} section {section}")
+            print(f"Estimated tokens: {result.get('token_estimate', 0)}")
+            if result.get('error'):
+                print(f"Error in DOM capture: {result['error']}")
+                Path("screenshots").mkdir(exist_ok=True)
+                await self.page.screenshot(path=f"screenshots/{self.provider}_dom_failure_{section}.png")
             return json.dumps(result, indent=2)
         except Exception as e:
-            print(f"DOM capture failed for {self.provider}: {str(e)}")
+            print(f"DOM capture failed for {self.provider} section {section}: {str(e)}")
             Path("screenshots").mkdir(exist_ok=True)
-            await self.page.screenshot(path=f"screenshots/{self.provider}_dom_failure.png")
+            await self.page.screenshot(path=f"screenshots/{self.provider}_dom_failure_{section}.png")
             return f"DOM capture failed: {str(e)}"
 
     async def execute_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
