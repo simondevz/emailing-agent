@@ -1,40 +1,63 @@
-from typing import List
-from langchain.schema.messages import AIMessage
+from typing import Dict, Any
 from rich.console import Console
-
-from agents.utils.initializer import get_llm
 from agents.utils.models import AgentState
+from langchain.schema.messages import AIMessage
+
+from agents.utils.tools import PlaywrightExecutor
 
 console = Console()
 
-# llm = get_llm()
+class PlaywrightAgent:
+    def __init__(self, provider: str = "gmail"):
+        self.executor = PlaywrightExecutor(provider)
+        self.initialized = False
 
-def execute_playwright_action(state: AgentState) -> AgentState:
-    """Playwright: Execute the instruction and update DOM."""
+    async def initialize(self):
+        """Initialize the Playwright executor"""
+        if not self.initialized:
+            self.initialized = await self.executor.setup()
+        return self.initialized
+
+    async def cleanup(self):
+        """Clean up the Playwright executor"""
+        await self.executor.cleanup()
+
+async def execute_playwright_action(state: AgentState, playwright_agent: PlaywrightAgent) -> AgentState:
+    """Execute Playwright action asynchronously"""
     if state["exit_requested"] or not state["current_instruction"]:
         return state
 
     console.print(f"⚙️ Executing instruction: {state['current_instruction']}", style="bold blue")
 
     try:
-        # Assume playwright_prompt and integration: use Playwright library to execute
-        # For demo, simulate execution
-        # In real: from playwright.sync_api import sync_playwright
-        # Execute step, capture new DOM or screenshot/text
-        new_dom = "SIMULATED NEW DOM AFTER EXECUTION"  # Replace with actual Playwright call
-        execution_result = "Action executed successfully."
+        # Ensure Playwright is initialized
+        if not playwright_agent.initialized:
+            if not await playwright_agent.initialize():
+                state["error_message"] = "Failed to initialize Playwright"
+                state["status"] = "error"
+                return state
 
-        state["current_dom"] = new_dom
-        state["execution_result"] = execution_result
-        state["status"] = "planning"  # Back to planner
-        state["current_instruction"] = None  # Clear after execution
-
-        state["messages"].append(AIMessage(content=f"Executed: {state['current_instruction']}. Result: {execution_result}"))
-
+        # Execute action
+        result = await playwright_agent.executor.execute_action(state["current_instruction"])
+        
+        if result["success"]:
+            # Update DOM after action
+            new_dom = await playwright_agent.executor.get_dom()
+            state["current_dom"] = new_dom
+            state["execution_result"] = result["action"]
+            state["status"] = "planning"
+            state["messages"].append(AIMessage(content=f"Executed: {result['action']}"))
+        else:
+            state["error_message"] = result["error"]
+            state["status"] = "error"
+            state["messages"].append(AIMessage(content=f"Execution failed: {result['error']}"))
+        
+        state["current_instruction"] = None
         return state
     
     except Exception as e:
-        console.print(f"❌ Error in playwright execution: {e}", style="bold red")
+        console.print(f"❌ Error in Playwright execution: {e}", style="bold red")
         state["error_message"] = str(e)
         state["status"] = "error"
+        state["messages"].append(AIMessage(content=f"Execution failed: {str(e)}"))
         return state

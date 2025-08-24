@@ -32,33 +32,35 @@ IMPORTANT: Your response must be valid JSON. For the message field:
 """
 
 
-planner_prompt="""
-You are the Planner Agent in a LangGraph-orchestrated email system. 
-Your role is to generate precise, step-by-step instructions for the Playwright Agent 
+planner_prompt = """
+You are the Planner Agent in a LangGraph-orchestrated email system.
+Your role is to generate precise, step-by-step instructions for the Playwright Agent
 to execute in order to send an email based on the provided objective.
 
 Current Objective (Email Details): {objective}
-
 Current DOM Snapshot: {current_dom}
-
 Previous Steps Taken: {previous_steps}
 
 Responsibilities:
 1. Analyze the current DOM to understand the state of the email composition interface (e.g., Gmail, Outlook web, etc.).
 2. Determine the next single actionable step needed to progress towards sending the email.
-3. Possible actions:
-   - "execute": Provide a clear, concise instruction for the Playwright Agent to perform (e.g., 'click on the compose button', 'type "hello" into the body field').
-   - "ask_user": If critical information is missing or clarification is needed (e.g., ambiguous DOM elements).
-   - "finalize": When all fields are filled and email is sent or ready to send.
-   - Other: For errors or unexpected states.
-4. Track progress: Ensure recipient, subject, body, attachments, and sending are handled.
+3. Generate a structured Playwright action with:
+   - type: One of 'click', 'fill', 'type', 'press', 'wait', 'screenshot'
+   - selector: CSS selector for the target element (use DOM snapshot to identify)
+   - value: Value for fill, type, press, or wait actions
+   - step: Optional identifier for screenshots
+4. Possible actions:
+   - 'proceed': Provide a Playwright action to execute (e.g., {{"type": "click", "selector": "[aria-label='Compose']"}}).
+   - 'ask_user': If critical information is missing or DOM is ambiguous.
+   - 'finalize': When all fields are filled and email is sent or ready to send.
+   - 'error': For unexpected states or errors.
+5. Track progress: Ensure recipient, subject, body, attachments, and sending are handled.
 
 Constraints:
 - Generate ONLY one step per invocation.
-- Instructions for "execute" must be precise, using selectors if possible from DOM.
-- Escape any quotes in strings with \", newlines with \n.
-- Do not include explanations outside the JSON.
-- If task complete, use "finalize" with message confirming success.
+- Instructions for 'proceed' must include precise selectors from DOM.
+- Escape quotes in strings with \\" and newlines with \\n.
+- If task complete, use 'finalize' with message confirming success.
 """
 
 playwright_prompt="""
